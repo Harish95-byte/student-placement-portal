@@ -1,0 +1,133 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>University Placement Portal</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f3f6fb;
+            color: #1e293b;
+        }
+        header {
+            background: #12356b;
+            color: white;
+            padding: 24px 7%;
+        }
+        header h1 { margin: 0 0 8px; }
+        nav { margin-top: 18px; }
+        nav a {
+            color: white;
+            text-decoration: none;
+            margin-right: 20px;
+        }
+        main { padding: 25px 7%; }
+        .hero {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 18px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px #0000000d;
+        }
+        .stat { color: #175cd3; font-size: 28px; font-weight: bold; }
+        h2 { color: #12356b; }
+        footer {
+            text-align: center;
+            padding: 20px;
+            background: #12356b;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>University Placement Portal</h1>
+    <p>Your gateway to career opportunities</p>
+    <nav>
+        <a href="#students">Students</a>
+        <a href="#companies">Companies</a>
+        <a href="#drives">Recruitment Drives</a>
+        <a href="#statistics">Statistics</a>
+    </nav>
+</header>
+
+<main>
+    <section class="hero">
+        <h2>Welcome to Campus Placements</h2>
+        <p>Explore job opportunities, check eligibility and prepare for your career.</p>
+    </section>
+
+    <section id="statistics">
+        <h2>Placement Statistics</h2>
+        <div class="grid">
+            <div class="card"><div class="stat">850+</div>Students Placed</div>
+            <div class="card"><div class="stat">120+</div>Recruiting Companies</div>
+            <div class="card"><div class="stat">₹12 LPA</div>Average Package</div>
+            <div class="card"><div class="stat">₹45 LPA</div>Highest Package</div>
+        </div>
+    </section>
+
+    <section id="students">
+        <h2>Student Profiles</h2>
+        <div class="grid">
+            <div class="card">
+                <h3>Arun Kumar</h3>
+                <p>Software Engineering</p>
+                <p>Skills: Python, Java, SQL</p>
+                <p>CGPA: 8.7</p>
+            </div>
+            <div class="card">
+                <h3>Priya Sharma</h3>
+                <p>Computer Science</p>
+                <p>Skills: Java, React, DBMS</p>
+                <p>CGPA: 9.1</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="companies">
+        <h2>Company Profiles</h2>
+        <div class="grid">
+            <div class="card"><h3>Microsoft</h3><p>Software Engineering and Cloud</p></div>
+            <div class="card"><h3>Amazon</h3><p>Software Development and AWS</p></div>
+            <div class="card"><h3>Infosys</h3><p>IT Services and Consulting</p></div>
+        </div>
+    </section>
+
+    <section id="drives">
+        <h2>Upcoming Recruitment Drives</h2>
+        <div class="grid">
+            <div class="card">
+                <h3>Microsoft Campus Drive</h3>
+                <p>Date: 20 November 2026</p>
+                <p>Eligibility: CGPA 7.0+, relevant skills</p>
+            </div>
+            <div class="card">
+                <h3>Amazon Campus Drive</h3>
+                <p>Date: 25 November 2026</p>
+                <p>Eligibility: CGPA 7.0+, coding skills</p>
+            </div>
+        </div>
+        <p><small>Sample demonstration data; replace with official placement-cell information.</small></p>
+    </section>
+</main>
+
+<footer>
+    <p>University Placement Cell | Student Placement Portal</p>
+</footer>
+</body>
+</html>
