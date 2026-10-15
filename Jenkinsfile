@@ -7,9 +7,10 @@ pipeline {
     }
 
     environment {
-        PATH+WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0'
         DOCKER_EXE = 'C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         KUBECTL_EXE = 'C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\kubectl.exe'
+        POWERSHELL_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
         IMAGE_NAME = 'harish2064/student-placement-portal'
         DEPLOYMENT_NAME = 'placement-portal'
         CONTAINER_NAME = 'placement-portal'
@@ -25,99 +26,85 @@ pipeline {
 
         stage('Check Tools') {
             steps {
-                powershell '''
-                    $ErrorActionPreference = 'Stop'
+                bat '''
+                    @echo off
+                    if not exist "%DOCKER_EXE%" (
+                        echo ERROR: Docker executable not found.
+                        exit /b 1
+                    )
+                    if not exist "%KUBECTL_EXE%" (
+                        echo ERROR: kubectl executable not found.
+                        exit /b 1
+                    )
+                    if not exist "%POWERSHELL_EXE%" (
+                        echo ERROR: Windows PowerShell executable not found.
+                        exit /b 1
+                    )
+                    if not exist "Dockerfile" (
+                        echo ERROR: Dockerfile is missing.
+                        exit /b 1
+                    )
+                    if not exist "index.html" (
+                        echo ERROR: index.html is missing.
+                        exit /b 1
+                    )
 
-                    if (!(Test-Path $env:DOCKER_EXE)) {
-                        throw "Docker executable not found: $env:DOCKER_EXE"
-                    }
+                    "%DOCKER_EXE%" version
+                    if errorlevel 1 exit /b 1
 
-                    if (!(Test-Path $env:KUBECTL_EXE)) {
-                        throw "kubectl executable not found: $env:KUBECTL_EXE"
-                    }
+                    "%KUBECTL_EXE%" version --client
+                    if errorlevel 1 exit /b 1
 
-                    if (!(Test-Path "Dockerfile")) {
-                        throw "Dockerfile is missing from the workspace."
-                    }
-
-                    if (!(Test-Path "index.html")) {
-                        throw "index.html is missing from the workspace."
-                    }
-
-                    & $env:DOCKER_EXE version
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Docker is not available."
-                    }
-
-                    & $env:KUBECTL_EXE version --client
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "kubectl client check failed."
-                    }
-
-                    Write-Host "Tool checks completed."
+                    echo Tool checks passed.
                 '''
             }
         }
 
         stage('Build Image') {
             steps {
-                powershell '''
-                    $ErrorActionPreference = 'Stop'
-                    $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
-
-                    Write-Host "Building image: $image"
-
-                    & $env:DOCKER_EXE build -t $image .
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Docker image build failed."
-                    }
+                bat '''
+                    @echo off
+                    "%DOCKER_EXE%" build -t "%IMAGE_NAME%:%BUILD_NUMBER%" .
+                    if errorlevel 1 (
+                        echo ERROR: Docker image build failed.
+                        exit /b 1
+                    )
+                    echo Docker image built successfully.
                 '''
             }
         }
 
         stage('Smoke Test') {
             steps {
-                powershell '''
-                    $ErrorActionPreference = 'Stop'
-                    $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
-                    $container = "placement-smoke-$env:BUILD_NUMBER"
-                    $testPassed = $false
+                bat '''
+                    @echo off
+                    set "TEST_CONTAINER=placement-smoke-%BUILD_NUMBER%"
 
-                    try {
-                        & $env:DOCKER_EXE run -d --name $container -p 18081:80 $image
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Could not start the smoke-test container."
-                        }
+                    "%DOCKER_EXE%" run -d --name "%TEST_CONTAINER%" -p 18081:80 "%IMAGE_NAME%:%BUILD_NUMBER%"
+                    if errorlevel 1 exit /b 1
 
-                        for ($i = 0; $i -lt 15; $i++) {
-                            Start-Sleep -Seconds 2
+                    set "TEST_OK=0"
 
-                            try {
-                                $response = Invoke-WebRequest `
-                                    -Uri "http://localhost:18081" `
-                                    -UseBasicParsing `
-                                    -TimeoutSec 3
+                    for /L %%i in (1,1,15) do (
+                        "%POWERSHELL_EXE%" -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:18081' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content.Contains('University Placement Portal')) { exit 0 } else { exit 1 } } catch { exit 1 }"
 
-                                if ($response.StatusCode -eq 200 -and
-                                    $response.Content -match 'University Placement Portal') {
-                                    $testPassed = $true
-                                    break
-                                }
-                            }
-                            catch {
-                                # The container may need more time to start.
-                            }
-                        }
+                        if not errorlevel 1 (
+                            set "TEST_OK=1"
+                            goto smoke_done
+                        )
 
-                        if (-not $testPassed) {
-                            throw "Smoke test failed. Expected the University Placement Portal page."
-                        }
+                        timeout /t 2 /nobreak >nul
+                    )
 
-                        Write-Host "Smoke test passed."
-                    }
-                    finally {
-                        & $env:DOCKER_EXE rm -f $container 2>$null
-                    }
+                    :smoke_done
+                    "%DOCKER_EXE%" rm -f "%TEST_CONTAINER%"
+
+                    if not "%TEST_OK%"=="1" (
+                        echo ERROR: Smoke test failed.
+                        exit /b 1
+                    )
+
+                    echo Smoke test passed.
                 '''
             }
         }
@@ -131,35 +118,34 @@ pipeline {
                         passwordVariable: 'DOCKER_PASS'
                     )
                 ]) {
-                    powershell '''
-                        $ErrorActionPreference = 'Stop'
-                        $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
-                        $dockerConfig = Join-Path $env:WORKSPACE ".docker-ci-$env:BUILD_NUMBER"
+                    bat '''
+                        @echo off
+                        setlocal
+                        set "DOCKER_CONFIG=%WORKSPACE%\\.docker-ci-%BUILD_NUMBER%"
 
-                        try {
-                            New-Item -ItemType Directory -Path $dockerConfig -Force | Out-Null
-                            $env:DOCKER_CONFIG = $dockerConfig
+                        if not exist "%DOCKER_CONFIG%" mkdir "%DOCKER_CONFIG%"
 
-                            $env:DOCKER_PASS |
-                                & $env:DOCKER_EXE login `
-                                    --username $env:DOCKER_USER `
-                                    --password-stdin
+                        "%DOCKER_EXE%" login -u "%DOCKER_USER%" --password-stdin <NUL
+                        rem Login is performed below using PowerShell to avoid printing the token.
 
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Docker Hub login failed."
-                            }
+                        "%POWERSHELL_EXE%" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $env:DOCKER_PASS | & $env:DOCKER_EXE login --username $env:DOCKER_USER --password-stdin; if ($LASTEXITCODE -ne 0) { exit 1 }"
 
-                            & $env:DOCKER_EXE push $image
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Docker Hub push failed. Check repository access and token permissions."
-                            }
+                        if errorlevel 1 (
+                            echo ERROR: Docker Hub login failed.
+                            rmdir /s /q "%DOCKER_CONFIG%" 2>nul
+                            exit /b 1
+                        )
 
-                            Write-Host "Successfully pushed $image"
-                        }
-                        finally {
-                            Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
-                            Remove-Item -Path $dockerConfig -Recurse -Force -ErrorAction SilentlyContinue
-                        }
+                        "%DOCKER_EXE%" push "%IMAGE_NAME%:%BUILD_NUMBER%"
+                        if errorlevel 1 (
+                            echo ERROR: Docker Hub push failed. Check repository access and token permissions.
+                            rmdir /s /q "%DOCKER_CONFIG%" 2>nul
+                            exit /b 1
+                        )
+
+                        rmdir /s /q "%DOCKER_CONFIG%" 2>nul
+                        echo Docker image pushed successfully.
+                        endlocal
                     '''
                 }
             }
@@ -173,80 +159,45 @@ pipeline {
                         variable: 'KUBECONFIG_FILE'
                     )
                 ]) {
-                    powershell '''
-                        $ErrorActionPreference = 'Stop'
-                        $env:KUBECONFIG = $env:KUBECONFIG_FILE
+                    bat '''
+                        @echo off
+                        setlocal
+                        set "KUBECONFIG=%KUBECONFIG_FILE%"
 
-                        $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
-                        $deployment = $env:DEPLOYMENT_NAME
-                        $container = $env:CONTAINER_NAME
-                        $kubectl = $env:KUBECTL_EXE
-                        $previousImage = ""
+                        if not exist "deployment.yaml" (
+                            echo ERROR: deployment.yaml is missing.
+                            exit /b 1
+                        )
 
-                        try {
-                            Write-Host "Checking Kubernetes connection..."
+                        "%KUBECTL_EXE%" get nodes
+                        if errorlevel 1 (
+                            echo ERROR: Kubernetes connection failed.
+                            exit /b 1
+                        )
 
-                            & $kubectl get nodes
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Cannot connect to Kubernetes. Check the config credential and Docker Desktop."
-                            }
+                        "%KUBECTL_EXE%" apply -f deployment.yaml
+                        if errorlevel 1 exit /b 1
 
-                            $existingDeployment = & $kubectl get deployment $deployment --ignore-not-found -o name
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Could not check the existing deployment."
-                            }
+                        "%KUBECTL_EXE%" set image deployment/%DEPLOYMENT_NAME% %CONTAINER_NAME%=%IMAGE_NAME%:%BUILD_NUMBER%
+                        if errorlevel 1 (
+                            echo ERROR: Could not update the deployment image.
+                            "%KUBECTL_EXE%" rollout undo deployment/%DEPLOYMENT_NAME%
+                            exit /b 1
+                        )
 
-                            if ($existingDeployment) {
-                                $previousImage = & $kubectl get deployment $deployment -o "jsonpath={.spec.template.spec.containers[0].image}"
-                                if ($LASTEXITCODE -ne 0) {
-                                    throw "Could not read the previous deployment image."
-                                }
-                            }
+                        "%KUBECTL_EXE%" rollout status deployment/%DEPLOYMENT_NAME% --timeout=180s
+                        if errorlevel 1 (
+                            echo ERROR: Deployment rollout failed. Attempting rollback.
+                            "%KUBECTL_EXE%" rollout undo deployment/%DEPLOYMENT_NAME%
+                            exit /b 1
+                        )
 
-                            if (!(Test-Path "deployment.yaml")) {
-                                throw "deployment.yaml is missing from the workspace."
-                            }
+                        "%KUBECTL_EXE%" get deployments
+                        "%KUBECTL_EXE%" get services
+                        "%KUBECTL_EXE%" get pods -o wide
 
-                            & $kubectl apply -f deployment.yaml
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Applying deployment.yaml failed."
-                            }
-
-                            & $kubectl set image "deployment/$deployment" "$container=$image"
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Updating the Kubernetes image failed."
-                            }
-
-                            & $kubectl rollout status "deployment/$deployment" --timeout=180s
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Kubernetes rollout failed."
-                            }
-
-                            Write-Host "Deployment succeeded."
-                            & $kubectl get deployments
-                            & $kubectl get services
-                            & $kubectl get pods -o wide
-                        }
-                        catch {
-                            $failure = $_.Exception.Message
-                            Write-Host "Deployment error: $failure"
-                            Write-Host "Attempting rollback..."
-
-                            if ($previousImage) {
-                                & $kubectl set image "deployment/$deployment" "$container=$previousImage"
-                                if ($LASTEXITCODE -eq 0) {
-                                    & $kubectl rollout status "deployment/$deployment" --timeout=180s
-                                }
-                            }
-                            else {
-                                & $kubectl delete deployment $deployment --ignore-not-found
-                            }
-
-                            throw $failure
-                        }
-                        finally {
-                            Remove-Item Env:KUBECONFIG -ErrorAction SilentlyContinue
-                        }
+                        echo Kubernetes deployment completed successfully.
+                        endlocal
                     '''
                 }
             }
@@ -255,11 +206,11 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: Placement Portal image pushed and Kubernetes deployment completed.'
+            echo 'SUCCESS: Image built, tested, pushed, and deployed.'
         }
 
         failure {
-            echo 'FAILED: Check the stage error in Console Output. The pipeline stops when a required stage fails.'
+            echo 'FAILED: Check the first error in Console Output.'
         }
 
         always {
