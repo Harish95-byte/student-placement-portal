@@ -6,6 +6,9 @@ pipeline {
         IMAGE = 'harish2064/student-placement-portal'
         DEPLOYMENT = 'placement-portal'
         CONTAINER = 'placement-portal'
+        SERVICE = 'placement-portal-service'
+        DOCKER_DIR = 'C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
+        PATH = "${DOCKER_DIR};${env.PATH}"
     }
 
     stages {
@@ -15,28 +18,61 @@ pipeline {
             }
         }
 
+        stage('Check Tools') {
+            steps {
+                bat '''
+                    echo Checking Docker CLI...
+                    "%DOCKER_DIR%\\docker.exe" --version
+                    echo Checking Kubernetes CLI...
+                    kubectl version --client
+                '''
+            }
+        }
+
         stage('Build Docker Image') {
             steps {
-                bat 'docker build -t %IMAGE%:%BUILD_NUMBER% .'
+                bat '''
+                    "%DOCKER_DIR%\\docker.exe" build -t %IMAGE%:%BUILD_NUMBER% .
+                '''
             }
         }
 
         stage('Test Docker Image') {
             steps {
-                bat '''
-                    docker rm -f placement-ci-test 2>nul
-                    docker run -d --name placement-ci-test -p 18080:80 %IMAGE%:%BUILD_NUMBER%
-                '''
-                powershell '''
+                script {
                     try {
-                        $response = Invoke-WebRequest http://localhost:18080 -TimeoutSec 15
-                        if ($response.Content -notmatch 'University Placement Portal|Student Placement Portal') {
-                            throw "Portal smoke test failed"
-                        }
-                    } finally {
-                        docker rm -f placement-ci-test
+                        bat '''
+                            "%DOCKER_DIR%\\docker.exe" rm -f placement-ci-test 2>nul
+                            "%DOCKER_DIR%\\docker.exe" run -d --name placement-ci-test -p 18080:80 %IMAGE%:%BUILD_NUMBER%
+                        '''
+
+                        powershell '''
+                            $ok = $false
+                            try {
+                                for ($i = 0; $i -lt 12; $i++) {
+                                    try {
+                                        $r = Invoke-WebRequest "http://localhost:18080" -TimeoutSec 3
+                                        if ($r.Content -match 'University Placement Portal|Student Placement Portal') {
+                                            $ok = $true
+                                            break
+                                        }
+                                    } catch {
+                                        Start-Sleep -Seconds 2
+                                    }
+                                }
+
+                                if (-not $ok) {
+                                    throw "Local Docker smoke test failed"
+                                }
+                            } finally {
+                                & "$env:DOCKER_DIR\\docker.exe" rm -f placement-ci-test
+                            }
+                        '''
+                    } catch (err) {
+                        bat '"%DOCKER_DIR%\\docker.exe" rm -f placement-ci-test'
+                        throw err
                     }
-                '''
+                }
             }
         }
 
@@ -50,12 +86,13 @@ pipeline {
                     )
                 ]) {
                     powershell '''
-                        $env:DH_TOKEN | docker login -u $env:DH_USER --password-stdin
+                        $env:DH_TOKEN | & "$env:DOCKER_DIR\\docker.exe" login -u $env:DH_USER --password-stdin
                         if ($LASTEXITCODE -ne 0) {
-                            throw "Docker login failed"
+                            throw "Docker Hub login failed"
                         }
                     '''
-                    bat 'docker push %IMAGE%:%BUILD_NUMBER%'
+
+                    bat '"%DOCKER_DIR%\\docker.exe" push %IMAGE%:%BUILD_NUMBER%'
                 }
             }
         }
@@ -71,21 +108,58 @@ pipeline {
                     script {
                         try {
                             bat 'kubectl apply -f deployment.yaml'
-                            bat 'kubectl set image deployment/%DEPLOYMENT% %CONTAINER%=%IMAGE%:%BUILD_NUMBER%'
-                            bat 'kubectl rollout status deployment/%DEPLOYMENT% --timeout=120s'
+
+                            bat '''
+                                kubectl set image deployment/%DEPLOYMENT% %CONTAINER%=%IMAGE%:%BUILD_NUMBER%
+                            '''
+
+                            bat '''
+                                kubectl rollout status deployment/%DEPLOYMENT% --timeout=120s
+                            '''
 
                             powershell '''
-                                $response = Invoke-WebRequest http://localhost:8082 -TimeoutSec 20
-                                if ($response.Content -notmatch 'University Placement Portal|Student Placement Portal') {
-                                    throw "Deployment smoke test failed"
+                                $pf = Start-Process kubectl `
+                                    -ArgumentList @("port-forward", "service/placement-portal-service", "18082:80") `
+                                    -PassThru -WindowStyle Hidden
+
+                                try {
+                                    $ok = $false
+                                    for ($i = 0; $i -lt 20; $i++) {
+                                        if ($pf.HasExited) {
+                                            throw "kubectl port-forward stopped unexpectedly"
+                                        }
+
+                                        try {
+                                            $r = Invoke-WebRequest "http://localhost:18082" -TimeoutSec 3
+                                            if ($r.Content -match 'University Placement Portal|Student Placement Portal') {
+                                                $ok = $true
+                                                break
+                                            }
+                                        } catch {
+                                            Start-Sleep -Seconds 2
+                                        }
+                                    }
+
+                                    if (-not $ok) {
+                                        throw "Kubernetes application smoke test failed"
+                                    }
+                                } finally {
+                                    if ($pf -and -not $pf.HasExited) {
+                                        Stop-Process -Id $pf.Id -Force
+                                    }
                                 }
                             '''
 
                             bat 'kubectl get pods'
                         } catch (err) {
-                            bat 'kubectl rollout undo deployment/placement-portal'
-                            bat 'kubectl rollout status deployment/placement-portal --timeout=120s'
-                            bat 'kubectl get pods'
+                            echo "Deployment or verification failed. Attempting rollback."
+
+                            bat '''
+                                kubectl rollout undo deployment/placement-portal
+                                kubectl rollout status deployment/placement-portal --timeout=120s
+                                kubectl get pods
+                            '''
+
                             error("Deployment verification failed; rollback attempted. ${err}")
                         }
                     }
