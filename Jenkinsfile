@@ -49,19 +49,12 @@ pipeline {
                         exit /b 1
                     )
 
-                    echo Checking Docker...
                     "%DOCKER_EXE%" --version
                     if errorlevel 1 exit /b 1
 
-                    echo Checking kubectl...
                     "%KUBECTL_EXE%" version --client
                     if errorlevel 1 exit /b 1
 
-                    echo Checking PowerShell...
-                    "%PS_EXE%" -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"
-                    if errorlevel 1 exit /b 1
-
-                    echo Checking Docker daemon...
                     "%DOCKER_EXE%" info
                     if errorlevel 1 exit /b 1
                 '''
@@ -71,8 +64,6 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 bat '''
-                    echo Building image %IMAGE%:%BUILD_NUMBER%
-
                     "%DOCKER_EXE%" build --pull=false -t %IMAGE%:%BUILD_NUMBER% .
                     if errorlevel 1 exit /b 1
 
@@ -98,14 +89,13 @@ pipeline {
                         int smokeResult = bat(
                             returnStatus: true,
                             script: '''
-                                "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 15; $i++) { try { $body = & '%DOCKER_EXE%' exec placement-ci-test wget -q -O - http://127.0.0.1/ 2>&1; $code=$LASTEXITCODE; $content=$body -join [Environment]::NewLine; if($code -eq 0 -and $content -match 'University Placement Portal') { $ok=$true; break } } catch {}; Start-Sleep -Seconds 2 }; if(-not $ok) { Write-Output 'Container status:'; & '%DOCKER_EXE%' ps -a --filter name=placement-ci-test; Write-Output 'Container logs:'; & '%DOCKER_EXE%' logs placement-ci-test; Write-Error 'Smoke test failed: expected University Placement Portal in the HTTP response.'; exit 1 }; Write-Output 'Docker smoke test passed.'"
+                                "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 15; $i++) { $body = & $env:DOCKER_EXE exec placement-ci-test wget -q -O - http://127.0.0.1/ 2>&1; $code=$LASTEXITCODE; $content=$body -join [Environment]::NewLine; if($code -eq 0 -and $content -match 'University Placement Portal') { $ok=$true; break }; Start-Sleep -Seconds 2 }; if(-not $ok) { Write-Output 'Container status:'; & $env:DOCKER_EXE ps -a --filter name=placement-ci-test; Write-Output 'Container logs:'; & $env:DOCKER_EXE logs placement-ci-test; Write-Error 'Docker smoke test failed'; exit 1 }; Write-Output 'Docker smoke test passed.'"
                             '''
                         )
 
                         if (smokeResult != 0) {
-                            error('Docker smoke test failed. Review the diagnostic output.')
+                            error('Docker smoke test failed. Review container diagnostics.')
                         }
-
                     } finally {
                         bat(
                             returnStatus: true,
@@ -128,20 +118,42 @@ pipeline {
                         passwordVariable: 'DH_TOKEN'
                     )
                 ]) {
-                    bat '''
-                        echo Logging in to Docker Hub...
+                    script {
+                        def dockerConfigDir =
+                            "${env.WORKSPACE}\\.docker-ci-${env.BUILD_NUMBER}"
 
-                        "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$env:DH_TOKEN | & '%DOCKER_EXE%' login -u $env:DH_USER --password-stdin; if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
-                        if errorlevel 1 exit /b 1
+                        try {
+                            withEnv(["DOCKER_CONFIG=${dockerConfigDir}"]) {
+                                bat '''
+                                    if not exist "%DOCKER_CONFIG%" mkdir "%DOCKER_CONFIG%"
+                                    if errorlevel 1 exit /b 1
 
-                        "%DOCKER_EXE%" push %IMAGE%:%BUILD_NUMBER%
-                        if errorlevel 1 exit /b 1
+                                    echo {}>"%DOCKER_CONFIG%\\config.json"
 
-                        "%DOCKER_EXE%" push %IMAGE%:latest
-                        if errorlevel 1 exit /b 1
+                                    echo Logging in to Docker Hub...
 
-                        echo Docker Hub push completed.
-                    '''
+                                    "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$env:DH_TOKEN | & $env:DOCKER_EXE login -u $env:DH_USER --password-stdin; if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+                                    if errorlevel 1 exit /b 1
+
+                                    "%DOCKER_EXE%" push %IMAGE%:%BUILD_NUMBER%
+                                    if errorlevel 1 exit /b 1
+
+                                    "%DOCKER_EXE%" push %IMAGE%:latest
+                                    if errorlevel 1 exit /b 1
+
+                                    echo Docker Hub push completed.
+                                '''
+                            }
+                        } finally {
+                            bat(
+                                returnStatus: true,
+                                script: '''
+                                    if exist "%WORKSPACE%\\.docker-ci-%BUILD_NUMBER%" rmdir /S /Q "%WORKSPACE%\\.docker-ci-%BUILD_NUMBER%"
+                                    exit /b 0
+                                '''
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -155,7 +167,8 @@ pipeline {
                             variable: 'KUBECONFIG_CRED'
                         )
                     ]) {
-                        def kubeconfigPath = "${env.WORKSPACE}\\kubeconfig-ci"
+                        def kubeconfigPath =
+                            "${env.WORKSPACE}\\kubeconfig-ci"
 
                         try {
                             bat '''
@@ -182,7 +195,7 @@ pipeline {
                                     '''
                                 ).trim()
 
-                                echo "Previous image: ${previousImage ?: 'Not available'}"
+                                echo "Previous image: ${previousImage}"
 
                                 bat '''
                                     "%KUBECTL_EXE%" apply -f deployment.yaml
@@ -190,93 +203,21 @@ pipeline {
 
                                     "%KUBECTL_EXE%" set image deployment/%DEPLOYMENT% %CONTAINER_NAME%=%IMAGE%:%BUILD_NUMBER%
                                     if errorlevel 1 exit /b 1
+
+                                    "%KUBECTL_EXE%" rollout status deployment/%DEPLOYMENT% --timeout=120s
+                                    if errorlevel 1 exit /b 1
+
+                                    "%KUBECTL_EXE%" get deployments
+                                    "%KUBECTL_EXE%" get pods -o wide
+                                    "%KUBECTL_EXE%" get services
+                                    "%KUBECTL_EXE%" get endpoints %SERVICE%
                                 '''
 
                                 try {
-                                    bat '''
-                                        "%KUBECTL_EXE%" rollout status deployment/%DEPLOYMENT% --timeout=120s
-                                        if errorlevel 1 exit /b 1
-
-                                        "%KUBECTL_EXE%" get deployments
-                                        "%KUBECTL_EXE%" get pods -o wide
-                                        "%KUBECTL_EXE%" get services
-                                        "%KUBECTL_EXE%" get endpoints %SERVICE%
-                                    '''
-
-                                    int verifyResult = powershell(
+                                    int verifyResult = bat(
                                         returnStatus: true,
                                         script: '''
-                                            $ErrorActionPreference = 'Stop'
-
-                                            $kubectl = $env:KUBECTL_EXE
-                                            $port = [int]$env:VERIFY_PORT
-                                            $service = $env:SERVICE
-                                            $log = Join-Path $env:WORKSPACE 'port-forward-ci.log'
-                                            $err = Join-Path $env:WORKSPACE 'port-forward-ci-error.log'
-                                            $process = $null
-
-                                            try {
-                                                $process = Start-Process `
-                                                    -FilePath $kubectl `
-                                                    -ArgumentList @(
-                                                        'port-forward',
-                                                        "service/$service",
-                                                        "${port}:80",
-                                                        '--address',
-                                                        '127.0.0.1'
-                                                    ) `
-                                                    -PassThru `
-                                                    -RedirectStandardOutput $log `
-                                                    -RedirectStandardError $err `
-                                                    -NoNewWindow
-
-                                                $ok = $false
-
-                                                for ($i = 0; $i -lt 30; $i++) {
-                                                    if ($process.HasExited) {
-                                                        break
-                                                    }
-
-                                                    try {
-                                                        $response = Invoke-WebRequest `
-                                                            -Uri "http://127.0.0.1:$port/" `
-                                                            -TimeoutSec 3 `
-                                                            -UseBasicParsing
-
-                                                        if (
-                                                            $response.StatusCode -eq 200 -and
-                                                            $response.Content -match 'University Placement Portal'
-                                                        ) {
-                                                            $ok = $true
-                                                            break
-                                                        }
-                                                    }
-                                                    catch {}
-
-                                                    Start-Sleep -Seconds 2
-                                                }
-
-                                                if (-not $ok) {
-                                                    Write-Output 'Port-forward output:'
-                                                    if (Test-Path $log) {
-                                                        Get-Content $log
-                                                    }
-
-                                                    Write-Output 'Port-forward errors:'
-                                                    if (Test-Path $err) {
-                                                        Get-Content $err
-                                                    }
-
-                                                    throw 'Kubernetes service verification failed.'
-                                                }
-
-                                                Write-Output 'Kubernetes service verification passed.'
-                                            }
-                                            finally {
-                                                if ($process -and -not $process.HasExited) {
-                                                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                                                }
-                                            }
+                                            "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $port=[int]$env:VERIFY_PORT; $log=Join-Path $env:WORKSPACE 'port-forward-ci.log'; $err=Join-Path $env:WORKSPACE 'port-forward-ci-error.log'; $p=$null; try { $p=Start-Process -FilePath $env:KUBECTL_EXE -ArgumentList @('port-forward',('service/'+$env:SERVICE),($port.ToString()+':80'),'--address','127.0.0.1') -PassThru -RedirectStandardOutput $log -RedirectStandardError $err -NoNewWindow; $ok=$false; for($i=0; $i -lt 30; $i++) { if($p.HasExited) { break }; try { $r=Invoke-WebRequest -Uri ('http://127.0.0.1:'+$port+'/') -TimeoutSec 3 -UseBasicParsing; if($r.StatusCode -eq 200 -and $r.Content -match 'University Placement Portal') { $ok=$true; break } } catch {}; Start-Sleep -Seconds 2 }; if(-not $ok) { Write-Output 'Port-forward output:'; if(Test-Path $log) { Get-Content $log }; Write-Output 'Port-forward errors:'; if(Test-Path $err) { Get-Content $err }; throw 'Kubernetes service verification failed' }; Write-Output 'Kubernetes service verification passed.' } finally { if($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }"
                                         '''
                                     )
 
@@ -285,8 +226,8 @@ pipeline {
                                     }
 
                                     bat '''
-                                        "%KUBECTL_EXE%" get pods
                                         "%KUBECTL_EXE%" get deployment %DEPLOYMENT%
+                                        "%KUBECTL_EXE%" get pods
                                     '''
 
                                 } catch (deploymentError) {
@@ -310,7 +251,6 @@ pipeline {
                                         """
                                     }
 
-                                    echo 'Rollback completed.'
                                     throw deploymentError
                                 }
                             }
@@ -333,11 +273,11 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: Docker build, smoke test, Docker Hub push, Kubernetes deployment, and service verification completed.'
+            echo 'SUCCESS: Build, smoke test, Docker Hub push, Kubernetes deployment, and service verification completed.'
         }
 
         failure {
-            echo 'FAILURE: Check the first failed stage in the Jenkins console output.'
+            echo 'FAILURE: Inspect the first failed stage in Console Output.'
         }
 
         always {
