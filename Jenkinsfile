@@ -7,8 +7,11 @@ pipeline {
         DEPLOYMENT = 'placement-portal'
         CONTAINER = 'placement-portal'
         SERVICE = 'placement-portal-service'
+
         DOCKER_DIR = 'C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
-        PATH = "${DOCKER_DIR};${env.PATH}"
+        PS_DIR = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0'
+
+        PATH = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;${env.PATH}"
     }
 
     stages {
@@ -21,19 +24,16 @@ pipeline {
         stage('Check Tools') {
             steps {
                 bat '''
-                    echo Checking Docker CLI...
                     "%DOCKER_DIR%\\docker.exe" --version
-                    echo Checking Kubernetes CLI...
                     kubectl version --client
+                    "%PS_DIR%\\powershell.exe" -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"
                 '''
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                bat '''
-                    "%DOCKER_DIR%\\docker.exe" build -t %IMAGE%:%BUILD_NUMBER% .
-                '''
+                bat '"%DOCKER_DIR%\\docker.exe" build -t %IMAGE%:%BUILD_NUMBER% .'
             }
         }
 
@@ -49,7 +49,7 @@ pipeline {
                         powershell '''
                             $ok = $false
                             try {
-                                for ($i = 0; $i -lt 12; $i++) {
+                                for ($i = 0; $i -lt 15; $i++) {
                                     try {
                                         $r = Invoke-WebRequest "http://localhost:18080" -TimeoutSec 3
                                         if ($r.Content -match 'University Placement Portal|Student Placement Portal') {
@@ -60,9 +60,8 @@ pipeline {
                                         Start-Sleep -Seconds 2
                                     }
                                 }
-
                                 if (-not $ok) {
-                                    throw "Local Docker smoke test failed"
+                                    throw "Local portal verification failed"
                                 }
                             } finally {
                                 & "$env:DOCKER_DIR\\docker.exe" rm -f placement-ci-test
@@ -100,33 +99,26 @@ pipeline {
         stage('Deploy and Verify') {
             steps {
                 withCredentials([
-                    file(
-                        credentialsId: 'config',
-                        variable: 'KUBECONFIG'
-                    )
+                    file(credentialsId: 'config', variable: 'KUBECONFIG')
                 ]) {
                     script {
                         try {
                             bat 'kubectl apply -f deployment.yaml'
-
-                            bat '''
-                                kubectl set image deployment/%DEPLOYMENT% %CONTAINER%=%IMAGE%:%BUILD_NUMBER%
-                            '''
-
-                            bat '''
-                                kubectl rollout status deployment/%DEPLOYMENT% --timeout=120s
-                            '''
+                            bat 'kubectl set image deployment/%DEPLOYMENT% %CONTAINER%=%IMAGE%:%BUILD_NUMBER%'
+                            bat 'kubectl rollout status deployment/%DEPLOYMENT% --timeout=120s'
 
                             powershell '''
-                                $pf = Start-Process kubectl `
-                                    -ArgumentList @("port-forward", "service/placement-portal-service", "18082:80") `
-                                    -PassThru -WindowStyle Hidden
+                                $pf = $null
+                                $ok = $false
 
                                 try {
-                                    $ok = $false
+                                    $pf = Start-Process kubectl `
+                                        -ArgumentList @("port-forward", "service/placement-portal-service", "18082:80") `
+                                        -PassThru -WindowStyle Hidden
+
                                     for ($i = 0; $i -lt 20; $i++) {
                                         if ($pf.HasExited) {
-                                            throw "kubectl port-forward stopped unexpectedly"
+                                            throw "Port forwarding exited unexpectedly"
                                         }
 
                                         try {
@@ -141,7 +133,7 @@ pipeline {
                                     }
 
                                     if (-not $ok) {
-                                        throw "Kubernetes application smoke test failed"
+                                        throw "Kubernetes portal verification failed"
                                     }
                                 } finally {
                                     if ($pf -and -not $pf.HasExited) {
@@ -152,7 +144,7 @@ pipeline {
 
                             bat 'kubectl get pods'
                         } catch (err) {
-                            echo "Deployment or verification failed. Attempting rollback."
+                            echo 'Deployment verification failed. Attempting rollback.'
 
                             bat '''
                                 kubectl rollout undo deployment/placement-portal
@@ -160,7 +152,7 @@ pipeline {
                                 kubectl get pods
                             '''
 
-                            error("Deployment verification failed; rollback attempted. ${err}")
+                            error("Deployment failed; rollback attempted. ${err}")
                         }
                     }
                 }
