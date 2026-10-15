@@ -2,270 +2,251 @@ pipeline {
     agent any
 
     options {
-        skipDefaultCheckout(true)
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 25, unit: 'MINUTES')
     }
 
     environment {
         DOCKER_EXE = 'C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         KUBECTL_EXE = 'C:\\Users\\haris\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\kubectl.exe'
-        PS_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-
-        IMAGE = 'harish2064/student-placement-portal'
-        DEPLOYMENT = 'placement-portal'
+        IMAGE_NAME = 'harish2064/student-placement-portal'
+        DEPLOYMENT_NAME = 'placement-portal'
         CONTAINER_NAME = 'placement-portal'
-        SERVICE = 'placement-portal-service'
-
-        TEST_PORT = '18080'
-        VERIFY_PORT = '18082'
+        SERVICE_NAME = 'placement-portal-service'
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
-                bat 'git --version'
             }
         }
 
         stage('Check Tools') {
             steps {
-                bat '''
-                    if not exist "%DOCKER_EXE%" (
-                        echo ERROR: Docker executable not found.
-                        exit /b 1
-                    )
+                powershell '''
+                    $ErrorActionPreference = 'Stop'
 
-                    if not exist "%KUBECTL_EXE%" (
-                        echo ERROR: kubectl executable not found.
-                        exit /b 1
-                    )
-
-                    if not exist "%PS_EXE%" (
-                        echo ERROR: PowerShell executable not found.
-                        exit /b 1
-                    )
-
-                    "%DOCKER_EXE%" --version
-                    if errorlevel 1 exit /b 1
-
-                    "%KUBECTL_EXE%" version --client
-                    if errorlevel 1 exit /b 1
-
-                    "%DOCKER_EXE%" info
-                    if errorlevel 1 exit /b 1
-                '''
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                bat '''
-                    "%DOCKER_EXE%" build --pull=false -t %IMAGE%:%BUILD_NUMBER% .
-                    if errorlevel 1 exit /b 1
-
-                    "%DOCKER_EXE%" tag %IMAGE%:%BUILD_NUMBER% %IMAGE%:latest
-                    if errorlevel 1 exit /b 1
-
-                    echo Docker image build completed.
-                '''
-            }
-        }
-
-        stage('Test Docker Image') {
-            steps {
-                script {
-                    try {
-                        bat '''
-                            "%DOCKER_EXE%" rm -f placement-ci-test 2>nul
-
-                            "%DOCKER_EXE%" run -d --name placement-ci-test %IMAGE%:%BUILD_NUMBER%
-                            if errorlevel 1 exit /b 1
-                        '''
-
-                        int smokeResult = bat(
-                            returnStatus: true,
-                            script: '''
-                                "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 15; $i++) { $body = & $env:DOCKER_EXE exec placement-ci-test wget -q -O - http://127.0.0.1/ 2>&1; $code=$LASTEXITCODE; $content=$body -join [Environment]::NewLine; if($code -eq 0 -and $content -match 'University Placement Portal') { $ok=$true; break }; Start-Sleep -Seconds 2 }; if(-not $ok) { Write-Output 'Container status:'; & $env:DOCKER_EXE ps -a --filter name=placement-ci-test; Write-Output 'Container logs:'; & $env:DOCKER_EXE logs placement-ci-test; Write-Error 'Docker smoke test failed'; exit 1 }; Write-Output 'Docker smoke test passed.'"
-                            '''
-                        )
-
-                        if (smokeResult != 0) {
-                            error('Docker smoke test failed. Review container diagnostics.')
-                        }
-                    } finally {
-                        bat(
-                            returnStatus: true,
-                            script: '''
-                                "%DOCKER_EXE%" rm -f placement-ci-test 2>nul
-                                exit /b 0
-                            '''
-                        )
+                    if (!(Test-Path $env:DOCKER_EXE)) {
+                        throw "Docker executable not found: $env:DOCKER_EXE"
                     }
-                }
+
+                    if (!(Test-Path $env:KUBECTL_EXE)) {
+                        throw "kubectl executable not found: $env:KUBECTL_EXE"
+                    }
+
+                    if (!(Test-Path "Dockerfile")) {
+                        throw "Dockerfile is missing from the workspace."
+                    }
+
+                    if (!(Test-Path "index.html")) {
+                        throw "index.html is missing from the workspace."
+                    }
+
+                    & $env:DOCKER_EXE version
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker is not available."
+                    }
+
+                    & $env:KUBECTL_EXE version --client
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "kubectl client check failed."
+                    }
+
+                    Write-Host "Tool checks completed."
+                '''
             }
         }
 
-        stage('Push to Docker Hub') {
+        stage('Build Image') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = 'Stop'
+                    $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+
+                    Write-Host "Building image: $image"
+
+                    & $env:DOCKER_EXE build -t $image .
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker image build failed."
+                    }
+                '''
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = 'Stop'
+                    $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+                    $container = "placement-smoke-$env:BUILD_NUMBER"
+                    $testPassed = $false
+
+                    try {
+                        & $env:DOCKER_EXE run -d --name $container -p 18081:80 $image
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Could not start the smoke-test container."
+                        }
+
+                        for ($i = 0; $i -lt 15; $i++) {
+                            Start-Sleep -Seconds 2
+
+                            try {
+                                $response = Invoke-WebRequest `
+                                    -Uri "http://localhost:18081" `
+                                    -UseBasicParsing `
+                                    -TimeoutSec 3
+
+                                if ($response.StatusCode -eq 200 -and
+                                    $response.Content -match 'University Placement Portal') {
+                                    $testPassed = $true
+                                    break
+                                }
+                            }
+                            catch {
+                                # The container may need more time to start.
+                            }
+                        }
+
+                        if (-not $testPassed) {
+                            throw "Smoke test failed. Expected the University Placement Portal page."
+                        }
+
+                        Write-Host "Smoke test passed."
+                    }
+                    finally {
+                        & $env:DOCKER_EXE rm -f $container 2>$null
+                    }
+                '''
+            }
+        }
+
+        stage('Push Image') {
             steps {
                 withCredentials([
                     usernamePassword(
-                        credentialsId: 'dockerhub',
-                        usernameVariable: 'DH_USER',
-                        passwordVariable: 'DH_TOKEN'
+                        credentialsId: 'dockerhub1',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
                     )
                 ]) {
-                    script {
-                        def dockerConfigDir =
-                            "${env.WORKSPACE}\\.docker-ci-${env.BUILD_NUMBER}"
+                    powershell '''
+                        $ErrorActionPreference = 'Stop'
+                        $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+                        $dockerConfig = Join-Path $env:WORKSPACE ".docker-ci-$env:BUILD_NUMBER"
 
                         try {
-                            withEnv(["DOCKER_CONFIG=${dockerConfigDir}"]) {
-                                bat '''
-                                    if not exist "%DOCKER_CONFIG%" mkdir "%DOCKER_CONFIG%"
-                                    if errorlevel 1 exit /b 1
+                            New-Item -ItemType Directory -Path $dockerConfig -Force | Out-Null
+                            $env:DOCKER_CONFIG = $dockerConfig
 
-                                    echo {}>"%DOCKER_CONFIG%\\config.json"
+                            $env:DOCKER_PASS |
+                                & $env:DOCKER_EXE login `
+                                    --username $env:DOCKER_USER `
+                                    --password-stdin
 
-                                    echo Logging in to Docker Hub...
-
-                                    "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$env:DH_TOKEN | & $env:DOCKER_EXE login -u $env:DH_USER --password-stdin; if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
-                                    if errorlevel 1 exit /b 1
-
-                                    "%DOCKER_EXE%" push %IMAGE%:%BUILD_NUMBER%
-                                    if errorlevel 1 exit /b 1
-
-                                    "%DOCKER_EXE%" push %IMAGE%:latest
-                                    if errorlevel 1 exit /b 1
-
-                                    echo Docker Hub push completed.
-                                '''
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker Hub login failed."
                             }
-                        } finally {
-                            bat(
-                                returnStatus: true,
-                                script: '''
-                                    if exist "%WORKSPACE%\\.docker-ci-%BUILD_NUMBER%" rmdir /S /Q "%WORKSPACE%\\.docker-ci-%BUILD_NUMBER%"
-                                    exit /b 0
-                                '''
-                            )
+
+                            & $env:DOCKER_EXE push $image
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker Hub push failed. Check repository access and token permissions."
+                            }
+
+                            Write-Host "Successfully pushed $image"
                         }
-                    }
+                        finally {
+                            Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
+                            Remove-Item -Path $dockerConfig -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                    '''
                 }
             }
         }
 
-        stage('Deploy and Verify') {
+        stage('Deploy to Kubernetes') {
             steps {
-                script {
-                    withCredentials([
-                        file(
-                            credentialsId: 'config',
-                            variable: 'KUBECONFIG_CRED'
-                        )
-                    ]) {
-                        def kubeconfigPath =
-                            "${env.WORKSPACE}\\kubeconfig-ci"
+                withCredentials([
+                    file(
+                        credentialsId: 'config',
+                        variable: 'KUBECONFIG_FILE'
+                    )
+                ]) {
+                    powershell '''
+                        $ErrorActionPreference = 'Stop'
+                        $env:KUBECONFIG = $env:KUBECONFIG_FILE
+
+                        $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+                        $deployment = $env:DEPLOYMENT_NAME
+                        $container = $env:CONTAINER_NAME
+                        $kubectl = $env:KUBECTL_EXE
+                        $previousImage = ""
 
                         try {
-                            bat '''
-                                copy /Y "%KUBECONFIG_CRED%" "%WORKSPACE%\\kubeconfig-ci" >nul
-                                if errorlevel 1 exit /b 1
-                            '''
+                            Write-Host "Checking Kubernetes connection..."
 
-                            withEnv(["KUBECONFIG=${kubeconfigPath}"]) {
+                            & $kubectl get nodes
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Cannot connect to Kubernetes. Check the config credential and Docker Desktop."
+                            }
 
-                                echo 'Checking Kubernetes connection...'
+                            $existingDeployment = & $kubectl get deployment $deployment --ignore-not-found -o name
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Could not check the existing deployment."
+                            }
 
-                                bat '''
-                                    "%KUBECTL_EXE%" config current-context
-                                    if errorlevel 1 exit /b 1
-
-                                    "%KUBECTL_EXE%" get nodes
-                                    if errorlevel 1 exit /b 1
-                                '''
-
-                                def previousImage = bat(
-                                    returnStdout: true,
-                                    script: '''
-                                        "%KUBECTL_EXE%" get deployment %DEPLOYMENT% -o "jsonpath={.spec.template.spec.containers[0].image}"
-                                    '''
-                                ).trim()
-
-                                echo "Previous image: ${previousImage}"
-
-                                bat '''
-                                    "%KUBECTL_EXE%" apply -f deployment.yaml
-                                    if errorlevel 1 exit /b 1
-
-                                    "%KUBECTL_EXE%" set image deployment/%DEPLOYMENT% %CONTAINER_NAME%=%IMAGE%:%BUILD_NUMBER%
-                                    if errorlevel 1 exit /b 1
-
-                                    "%KUBECTL_EXE%" rollout status deployment/%DEPLOYMENT% --timeout=120s
-                                    if errorlevel 1 exit /b 1
-
-                                    "%KUBECTL_EXE%" get deployments
-                                    "%KUBECTL_EXE%" get pods -o wide
-                                    "%KUBECTL_EXE%" get services
-                                    "%KUBECTL_EXE%" get endpoints %SERVICE%
-                                '''
-
-                                try {
-                                    int verifyResult = bat(
-                                        returnStatus: true,
-                                        script: '''
-                                            "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $port=[int]$env:VERIFY_PORT; $log=Join-Path $env:WORKSPACE 'port-forward-ci.log'; $err=Join-Path $env:WORKSPACE 'port-forward-ci-error.log'; $p=$null; try { $p=Start-Process -FilePath $env:KUBECTL_EXE -ArgumentList @('port-forward',('service/'+$env:SERVICE),($port.ToString()+':80'),'--address','127.0.0.1') -PassThru -RedirectStandardOutput $log -RedirectStandardError $err -NoNewWindow; $ok=$false; for($i=0; $i -lt 30; $i++) { if($p.HasExited) { break }; try { $r=Invoke-WebRequest -Uri ('http://127.0.0.1:'+$port+'/') -TimeoutSec 3 -UseBasicParsing; if($r.StatusCode -eq 200 -and $r.Content -match 'University Placement Portal') { $ok=$true; break } } catch {}; Start-Sleep -Seconds 2 }; if(-not $ok) { Write-Output 'Port-forward output:'; if(Test-Path $log) { Get-Content $log }; Write-Output 'Port-forward errors:'; if(Test-Path $err) { Get-Content $err }; throw 'Kubernetes service verification failed' }; Write-Output 'Kubernetes service verification passed.' } finally { if($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }"
-                                        '''
-                                    )
-
-                                    if (verifyResult != 0) {
-                                        error('Kubernetes service verification failed.')
-                                    }
-
-                                    bat '''
-                                        "%KUBECTL_EXE%" get deployment %DEPLOYMENT%
-                                        "%KUBECTL_EXE%" get pods
-                                    '''
-
-                                } catch (deploymentError) {
-                                    echo 'Deployment verification failed. Attempting rollback.'
-
-                                    if (previousImage) {
-                                        bat """
-                                            "%KUBECTL_EXE%" set image deployment/${env.DEPLOYMENT} ${env.CONTAINER_NAME}=${previousImage}
-                                            if errorlevel 1 exit /b 1
-
-                                            "%KUBECTL_EXE%" rollout status deployment/${env.DEPLOYMENT} --timeout=120s
-                                            if errorlevel 1 exit /b 1
-                                        """
-                                    } else {
-                                        bat """
-                                            "%KUBECTL_EXE%" rollout undo deployment/${env.DEPLOYMENT}
-                                            if errorlevel 1 exit /b 1
-
-                                            "%KUBECTL_EXE%" rollout status deployment/${env.DEPLOYMENT} --timeout=120s
-                                            if errorlevel 1 exit /b 1
-                                        """
-                                    }
-
-                                    throw deploymentError
+                            if ($existingDeployment) {
+                                $previousImage = & $kubectl get deployment $deployment -o "jsonpath={.spec.template.spec.containers[0].image}"
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Could not read the previous deployment image."
                                 }
                             }
-                        } finally {
-                            bat(
-                                returnStatus: true,
-                                script: '''
-                                    if exist "%WORKSPACE%\\kubeconfig-ci" del /F /Q "%WORKSPACE%\\kubeconfig-ci"
-                                    if exist "%WORKSPACE%\\port-forward-ci.log" del /F /Q "%WORKSPACE%\\port-forward-ci.log"
-                                    if exist "%WORKSPACE%\\port-forward-ci-error.log" del /F /Q "%WORKSPACE%\\port-forward-ci-error.log"
-                                    exit /b 0
-                                '''
-                            )
+
+                            if (!(Test-Path "deployment.yaml")) {
+                                throw "deployment.yaml is missing from the workspace."
+                            }
+
+                            & $kubectl apply -f deployment.yaml
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Applying deployment.yaml failed."
+                            }
+
+                            & $kubectl set image "deployment/$deployment" "$container=$image"
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Updating the Kubernetes image failed."
+                            }
+
+                            & $kubectl rollout status "deployment/$deployment" --timeout=180s
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Kubernetes rollout failed."
+                            }
+
+                            Write-Host "Deployment succeeded."
+                            & $kubectl get deployments
+                            & $kubectl get services
+                            & $kubectl get pods -o wide
                         }
-                    }
+                        catch {
+                            $failure = $_.Exception.Message
+                            Write-Host "Deployment error: $failure"
+                            Write-Host "Attempting rollback..."
+
+                            if ($previousImage) {
+                                & $kubectl set image "deployment/$deployment" "$container=$previousImage"
+                                if ($LASTEXITCODE -eq 0) {
+                                    & $kubectl rollout status "deployment/$deployment" --timeout=180s
+                                }
+                            }
+                            else {
+                                & $kubectl delete deployment $deployment --ignore-not-found
+                            }
+
+                            throw $failure
+                        }
+                        finally {
+                            Remove-Item Env:KUBECONFIG -ErrorAction SilentlyContinue
+                        }
+                    '''
                 }
             }
         }
@@ -273,11 +254,11 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: Build, smoke test, Docker Hub push, Kubernetes deployment, and service verification completed.'
+            echo 'SUCCESS: Placement Portal image pushed and Kubernetes deployment completed.'
         }
 
         failure {
-            echo 'FAILURE: Inspect the first failed stage in Console Output.'
+            echo 'FAILED: Check the stage error in Console Output. The pipeline stops when a required stage fails.'
         }
 
         always {
